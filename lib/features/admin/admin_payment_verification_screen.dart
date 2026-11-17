@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../../core/constants/app_colors.dart';
+import '../../core/app_colors.dart';
 
 class AdminPaymentVerificationScreen extends StatefulWidget {
   const AdminPaymentVerificationScreen({super.key});

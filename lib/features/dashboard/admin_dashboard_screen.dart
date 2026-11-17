@@ -1,4 +1,8 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:file_saver/file_saver.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -112,6 +116,137 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
       if (!mounted) return;
 
       setState(() => _isLoading = false);
+    }
+  }
+
+  // ---------------------------------------------------------
+  // DOCUMENT DOWNLOAD (WEB + MOBILE)
+  // ---------------------------------------------------------
+
+  Future<void> _downloadDocument(String title, String imageUrl) async {
+    try {
+      final uri = Uri.tryParse(imageUrl);
+      if (uri == null || !uri.hasScheme) {
+        throw Exception('Invalid document URL.');
+      }
+
+      final response = await http.get(uri);
+      if (response.statusCode != 200) {
+        throw Exception('Could not download document (HTTP ${response.statusCode}).');
+      }
+
+      final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+      final path = uri.path.toLowerCase();
+      String extension = 'jpg';
+      if (contentType.contains('png') || path.endsWith('.png')) {
+        extension = 'png';
+      } else if (contentType.contains('pdf') || path.endsWith('.pdf')) {
+        extension = 'pdf';
+      } else if (contentType.contains('webp') || path.endsWith('.webp')) {
+        extension = 'webp';
+      } else if (contentType.contains('jpeg') || path.endsWith('.jpeg') ||
+          path.endsWith('.jpg')) {
+        extension = 'jpg';
+      }
+
+      final safeTitle = title
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+          .replaceAll(RegExp(r'^_|_$'), '');
+      await FileSaver.instance.saveFile(
+  name: '${safeTitle}_${DateTime.now().millisecondsSinceEpoch}',
+  bytes: Uint8List.fromList(response.bodyBytes),
+  fileExtension: extension,
+  mimeType: MimeType.other,
+);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$title downloaded successfully.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Download failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  // Opens WhatsApp with a pre-filled driver status message.
+  // The admin must press Send inside WhatsApp.
+  Future<void> _sendDriverStatusWhatsApp({
+    required Map<String, dynamic> driver,
+    required bool approved,
+  }) async {
+    String phone = (driver['whatsapp_number'] ??
+            driver['phone_number'] ??
+            '')
+        .toString()
+        .replaceAll(RegExp(r'\D'), '');
+
+    if (phone.length == 10) {
+      phone = '91$phone';
+    }
+
+    if (phone.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Driver WhatsApp number is not available.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    final name = driver['full_name']?.toString().trim();
+    final greetingName = (name == null || name.isEmpty) ? 'Driver' : name;
+    final message = approved
+        ? '''Hello $greetingName,
+
+Your driver registration for Rathod Cars Mitra (RCM) has been approved.
+
+Welcome to RCM! You can now proceed with the next steps and start receiving eligible trip assignments. Please keep your documents and vehicle details up to date.
+
+Thank you,
+Rathod Cars Mitra Team'''
+        : '''Hello $greetingName,
+
+Thank you for submitting your registration to Rathod Cars Mitra (RCM).
+
+Unfortunately, we could not approve your application because some of the submitted documents or information are incomplete or insufficient. Please review the details, correct or replace the required documents/information, and submit your application again for review.
+
+Thank you,
+Rathod Cars Mitra Team''';
+
+    final whatsappUri = Uri.parse(
+      'https://wa.me/$phone?text=${Uri.encodeComponent(message)}',
+    );
+
+    try {
+      final launched = await launchUrl(
+        whatsappUri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not open WhatsApp. Please check the number or app.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not open WhatsApp: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
@@ -337,6 +472,18 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
                                 },
                               ),
                             ),
+                          if (url != null && url.isNotEmpty) ...[
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: double.infinity,
+                              child: OutlinedButton.icon(
+                                onPressed: () =>
+                                    _downloadDocument(document.key, url),
+                                icon: const Icon(Icons.download),
+                                label: const Text('Download Document'),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     );
@@ -376,7 +523,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
       await _supabase.from('drivers').upsert({
         'full_name': regData['full_name'],
         'phone_number': regData['phone_number'],
-        'password': regData['password'] ?? '123456',
         'license_number': regData['license_number'],
         'vehicle_number': regData['car_number'],
         'vehicle_model': regData['car_name'],
@@ -391,6 +537,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
 
       if (!mounted) return;
 
+      await _sendDriverStatusWhatsApp(driver: regData, approved: true);
+
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -415,10 +564,22 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
 
   Future<void> _rejectDriver(String id) async {
     try {
+      final registration = _pendingDrivers.firstWhere(
+        (driver) => driver['id'].toString() == id,
+        orElse: () => <String, dynamic>{},
+      );
+
       await _supabase
           .from('driver_registrations')
           .update({'approval_status': 'rejected'})
           .eq('id', id);
+
+      if (registration.isNotEmpty) {
+        await _sendDriverStatusWhatsApp(
+          driver: registration,
+          approved: false,
+        );
+      }
 
       if (!mounted) return;
 
@@ -507,12 +668,34 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen>
         title: Text(title),
         content: imageUrl == null || imageUrl.isEmpty
             ? const Text('No document image available.')
-            : Image.network(
-                imageUrl,
-                errorBuilder: (_, __, ___) =>
-                    const Text('Failed to load image.'),
+            : SizedBox(
+                width: 520,
+                child: InteractiveViewer(
+                  child: Image.network(
+                    imageUrl,
+                    fit: BoxFit.contain,
+                    loadingBuilder: (context, child, progress) {
+                      if (progress == null) return child;
+                      return const SizedBox(
+                        height: 220,
+                        child: Center(child: CircularProgressIndicator()),
+                      );
+                    },
+                    errorBuilder: (_, __, ___) =>
+                        const SizedBox(
+                          height: 120,
+                          child: Center(child: Text('Failed to load image.')),
+                        ),
+                  ),
+                ),
               ),
         actions: [
+          if (imageUrl != null && imageUrl.isNotEmpty)
+            TextButton.icon(
+              onPressed: () => _downloadDocument(title, imageUrl),
+              icon: const Icon(Icons.download),
+              label: const Text('Download'),
+            ),
           TextButton(
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Close'),
